@@ -1,0 +1,6 @@
+/setup_alert_channel
+/pika_status
+/add_appstore_app name:Procreate country:GB search_term:Procreate normal_price:12.99 threshold_percent:10
+/scan_now product_id:1 send_alerts:false
+/products
+/deals
