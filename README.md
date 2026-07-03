@@ -216,6 +216,10 @@ For something more permanent, host it on:
 - Prefer APIs for stores that provide them.
 - Add source-specific scanners for sites that need JavaScript or have complex pricing.
 
+## Update 1.1
+Added source-specific promo scanners for CapCut Pro, Clip Studio Paint, Adobe UK promo pricing, and exact App Store track ID support. 
+The bot can now reliably track Procreate, CapCut Pro Monthly/Yearly, Clip Studio Paint PRO/EX, Adobe Photoshop, and Adobe Creative Cloud Pro, with scheduled Discord alerts when prices change.
+
 ## Next improvements
 
 Nice upgrades for version 2:
