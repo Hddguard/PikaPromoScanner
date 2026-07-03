@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 from .config import Config
 from .database import Database, Product
 from .scanners import PriceResult, ScanError, scan_product
+from .notifiers import send_telegram_alert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,6 +83,21 @@ def product_embed(product: Product, *, title_prefix: str = "📦") -> discord.Em
     return embed
 
 
+
+
+def telegram_alert_text(product: Product, result: PriceResult, reason: str, discount: float | None) -> str:
+    discount_line = f"\nDiscount: <b>{discount:g}%</b>" if discount is not None else ""
+    return (
+        f"🔥 <b>Price alert: {product.name}</b>\n\n"
+        f"Reason: {reason}\n"
+        f"Now: <b>{money(result.price, result.currency)}</b>\n"
+        f"Previous: {money(product.current_price, product.currency)}\n"
+        f"Normal: {money(product.normal_price, result.currency)}"
+        f"{discount_line}\n"
+        f"Source: {product.source}\n\n"
+        f"{result.url}"
+    )
+
 def alert_embed(product: Product, result: PriceResult, reason: str, discount: float | None) -> discord.Embed:
     embed = discord.Embed(
         title=f"🔥 Price alert: {product.name}",
@@ -133,21 +149,37 @@ async def scan_one(product: Product, *, send_alerts: bool = True) -> tuple[bool,
         alert, reason, discount = should_alert(product, updated)
 
         if alert and send_alerts:
+            sent_anywhere = False
+
             channel = await get_alert_channel()
             if channel is None:
-                LOGGER.warning("Deal found but no alert channel is configured")
-                return True, f"Deal found for {product.name}, but no alert channel is configured."
+                LOGGER.warning("Deal found but no Discord alert channel is configured")
+            else:
+                await channel.send(embed=alert_embed(product, result, reason, discount))
+                sent_anywhere = True
 
-            await channel.send(embed=alert_embed(product, result, reason, discount))
-            await DB.record_alert(
-                product_id=product.id,
-                price=result.price,
-                old_price=product.current_price,
-                normal_price=product.normal_price,
-                discount_percent=discount,
-                reason=reason,
+            telegram_sent = await send_telegram_alert(
+                telegram_alert_text(product, result, reason, discount)
             )
-            return True, f"Alert sent for {product.name}: {reason}."
+            sent_anywhere = sent_anywhere or telegram_sent
+
+            if sent_anywhere:
+                await DB.record_alert(
+                    product_id=product.id,
+                    price=result.price,
+                    old_price=product.current_price,
+                    normal_price=product.normal_price,
+                    discount_percent=discount,
+                    reason=reason,
+                )
+                destinations = []
+                if channel is not None:
+                    destinations.append("Discord")
+                if telegram_sent:
+                    destinations.append("Telegram")
+                return True, f"Alert sent for {product.name} via {', '.join(destinations)}: {reason}."
+
+            return True, f"Deal found for {product.name}, but no alert destination is configured."
 
         return False, f"Checked {product.name}: {money(result.price, result.currency)}."
 
