@@ -30,10 +30,14 @@ CURRENCY_SYMBOLS = {
     "$": "USD",
     "€": "EUR",
     "¥": "JPY",
+    "CN¥": "CNY",
+    "CA$": "CAD",
+    "A$": "AUD",
+    "US$": "USD",
 }
 
 PRICE_RE = re.compile(
-    r"(?P<symbol>[£$€¥])\s?(?P<price>\d{1,4}(?:[,.]\d{3})*(?:[,.]\d{2})?|\d{1,4})"
+    r"(?P<symbol>US\$|CA\$|A\$|CN¥|[£$€¥])\s?(?P<price>\d{1,4}(?:[,.]\d{3})*(?:[,.]\d{2})?|\d{1,4})"
 )
 
 
@@ -46,7 +50,19 @@ async def scan_product(product: Product, *, timeout_seconds: int = 25) -> PriceR
     if source == "generic":
         return await scan_generic(product, timeout_seconds=timeout_seconds)
 
-    raise ScanError(f"Unknown source '{product.source}'. Supported sources: generic, app_store")
+    if source == "capcut_vip":
+        return await scan_capcut_vip(product, timeout_seconds=timeout_seconds)
+
+    if source == "clipstudio_onetime":
+        return await scan_clipstudio_onetime(product, timeout_seconds=timeout_seconds)
+
+    if source == "adobe_page":
+        return await scan_adobe_page(product, timeout_seconds=timeout_seconds)
+
+    raise ScanError(
+        f"Unknown source '{product.source}'. Supported sources: "
+        "generic, app_store, capcut_vip, clipstudio_onetime, adobe_page"
+    )
 
 
 async def _fetch_text(url: str, *, timeout_seconds: int = 25) -> str:
@@ -80,6 +96,33 @@ async def _fetch_json(url: str, *, timeout_seconds: int = 25) -> dict[str, Any]:
             return await response.json(content_type=None)
 
 
+async def _post_json(
+    url: str,
+    *,
+    json_body: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout_seconds: int = 25,
+) -> dict[str, Any]:
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    request_headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; PikaPromoScanner/0.1)",
+        "Accept": "application/json,text/plain,*/*",
+        "Content-Type": "application/json",
+    }
+    if headers:
+        request_headers.update(headers)
+
+    async with aiohttp.ClientSession(headers=request_headers, timeout=timeout) as session:
+        async with session.post(url, json=json_body) as response:
+            text = await response.text(errors="replace")
+            if response.status >= 400:
+                raise ScanError(f"HTTP {response.status} while posting JSON API: {text[:300]}")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ScanError(f"API did not return JSON: {text[:300]}") from exc
+
+
 async def scan_app_store(product: Product, *, timeout_seconds: int = 25) -> PriceResult:
     """
     Scan Apple App Store / iTunes catalog entries.
@@ -111,7 +154,6 @@ async def scan_app_store(product: Product, *, timeout_seconds: int = 25) -> Pric
     item = results[0]
     price = item.get("price")
     if price is None:
-        # Some free/subscription listings may not expose a direct app purchase price.
         price = 0.0
 
     try:
@@ -131,6 +173,210 @@ async def scan_app_store(product: Product, *, timeout_seconds: int = 25) -> Pric
             "bundle_id": item.get("bundleId"),
             "formatted_price": item.get("formattedPrice"),
             "version": item.get("version"),
+        },
+    )
+
+
+async def scan_capcut_vip(product: Product, *, timeout_seconds: int = 25) -> PriceResult:
+    endpoint = product.url or "https://commerce-api-sg.capcut.com/commerce/v1/subscription/cc_price_list"
+    region = str(product.metadata.get("region", "GB")).upper()
+    language = str(product.metadata.get("language", "en"))
+    target_product_id = str(product.metadata.get("product_id", "capcut_pro_yearly_base"))
+
+    headers = {
+        "appid": "348188",
+        "loc": region,
+        "lan": language,
+        "pf": "7",
+        "appvr": "5.8.0",
+        "tdid": "",
+        "web_id": str(product.metadata.get("web_id", "7658086216906884624")),
+        "sign-ver": "1",
+        "app-sdk-version": "48.0.0",
+    }
+
+    body = {
+        "aid": 348188,
+        "scene": "vip",
+        "region": region,
+        "language": language,
+    }
+
+    raw = await _post_json(endpoint, json_body=body, headers=headers, timeout_seconds=timeout_seconds)
+
+    if str(raw.get("ret")) != "0":
+        raise ScanError(f"CapCut API error: {raw.get('errmsg') or raw}")
+
+    data = raw.get("data")
+    if not data and raw.get("response"):
+        try:
+            data = json.loads(raw["response"])
+        except json.JSONDecodeError:
+            data = None
+
+    if not isinstance(data, dict):
+        raise ScanError("CapCut API returned no usable data object")
+
+    products = data.get("all_price_list") or []
+    match = next((item for item in products if item.get("product_id") == target_product_id), None)
+    if not match:
+        available = ", ".join(str(item.get("product_id")) for item in products[:10])
+        raise ScanError(f"CapCut product_id not found: {target_product_id}. Available: {available}")
+
+    price_text = (
+        (match.get("pipo_amount") or {}).get("amount")
+        or match.get("price_tips")
+        or (match.get("total_amount") / 100 if isinstance(match.get("total_amount"), (int, float)) else None)
+    )
+
+    try:
+        price = float(price_text)
+    except (TypeError, ValueError) as exc:
+        raise ScanError(f"CapCut price was not numeric: {price_text!r}") from exc
+
+    currency = str(match.get("currency_code") or product.currency or "USD").upper()
+
+    return PriceResult(
+        name=product.name,
+        price=price,
+        currency=currency,
+        url="https://www.capcut.com/activities/subscribe/",
+        payload={
+            "source": "capcut_vip",
+            "endpoint": endpoint,
+            "region": region,
+            "product_id": match.get("product_id"),
+            "sku_id": match.get("sku_id"),
+            "sku_plan_id": match.get("sku_plan_id"),
+            "cycle_tips": match.get("cycle_tips"),
+            "subscribe_cycle": match.get("subscribe_cycle"),
+            "cycle_unit": match.get("cycle_unit"),
+            "vip_price_tips": match.get("vip_price_tips"),
+            "origin_price_tips": match.get("origin_price_tips"),
+            "discount_percent": match.get("discount_percent"),
+            "pipo_amount": match.get("pipo_amount"),
+            "can_trial": match.get("can_trial"),
+            "raw_item": match,
+        },
+    )
+
+
+async def scan_clipstudio_onetime(product: Product, *, timeout_seconds: int = 25) -> PriceResult:
+    url = product.url or "https://www.clipstudio.net/en/purchase/"
+    html = await _fetch_text(url, timeout_seconds=timeout_seconds)
+
+    edition = str(product.metadata.get("edition", "PRO")).upper()
+    currency = str(product.metadata.get("currency", product.currency or "GBP")).upper()
+
+    if edition not in {"PRO", "EX"}:
+        raise ScanError("Clip Studio edition must be PRO or EX")
+
+    data_name = "ProDATA_onetime" if edition == "PRO" else "ExDATA_onetime"
+
+    sale_text_match = re.search(
+        rf"{data_name}\s*=\s*\{{\s*'sale_save_text'\s*:\s*'([^']*)'",
+        html,
+        re.S,
+    )
+    sale_text = sale_text_match.group(1) if sale_text_match else ""
+
+    block_match = re.search(
+        rf"{data_name}\['{re.escape(currency)}'\]\s*=\s*\{{(.*?)\}}\s*;",
+        html,
+        re.S,
+    )
+    if not block_match:
+        raise ScanError(f"Could not find Clip Studio {edition} pricing block for {currency}")
+
+    fields = dict(re.findall(r"'([^']+)'\s*:\s*'([^']*)'", block_match.group(1)))
+
+    normal_price_text = fields.get("price", "")
+    sale_price_text = (
+        fields.get("sale_US", "")
+        + fields.get("sale_L_num", "")
+        + fields.get("sale_S_num", "")
+    ).strip()
+
+    current_text = sale_price_text if sale_price_text else normal_price_text
+    parsed = parse_price_text(current_text, currency)
+    if not parsed:
+        raise ScanError(f"Could not parse Clip Studio price: {current_text!r}")
+
+    price, parsed_currency = parsed
+
+    return PriceResult(
+        name=product.name,
+        price=price,
+        currency=parsed_currency or currency,
+        url=fields.get("url") or url,
+        payload={
+            "source": "clipstudio_onetime",
+            "edition": edition,
+            "currency": currency,
+            "normal_price_text": normal_price_text,
+            "sale_price_text": sale_price_text,
+            "sale_text": sale_text,
+            "store_url": fields.get("url"),
+            "paypal_url": fields.get("url_paypal"),
+            "raw_fields": fields,
+        },
+    )
+
+
+async def scan_adobe_page(product: Product, *, timeout_seconds: int = 25) -> PriceResult:
+    """
+    Adobe UK pricing pages do not expose final prices in plain HTML.
+    Instead, Adobe exposes promo markers / Milo OST price links in fragments.
+
+    This scanner tracks the presence of known promo markers and maps them to
+    known Adobe UK public prices. If the marker disappears, it falls back to
+    the configured normal_price.
+    """
+
+    name_lower = product.name.lower()
+
+    fragment_url = str(
+        product.metadata.get(
+            "fragment_url",
+            "https://main--cc--adobecom.aem.live/uk/cc-shared/fragments/merch/products/photoshop/compare-plans/table/individual/intro-pricing",
+        )
+    )
+
+    html = await _fetch_text(fragment_url, timeout_seconds=timeout_seconds)
+
+    if "photoshop" in name_lower:
+        promo_marker = str(product.metadata.get("promo_marker", "promo=PSHOP_3MO_UK"))
+        promo_price = float(product.metadata.get("promo_price", 9.98))
+        normal_price = product.normal_price if product.normal_price is not None else 21.98
+        plan = "Photoshop Single App"
+    elif "creative cloud" in name_lower or "all apps" in name_lower:
+        promo_marker = str(product.metadata.get("promo_marker", "promo=CCI_AA_3MO_UK"))
+        promo_price = float(product.metadata.get("promo_price", 32.66))
+        normal_price = product.normal_price if product.normal_price is not None else 66.49
+        plan = "Creative Cloud All Apps"
+    else:
+        raise ScanError(
+            "Adobe page scanner currently supports Photoshop and Creative Cloud / All Apps by name."
+        )
+
+    promo_active = promo_marker in html
+    price = promo_price if promo_active else float(normal_price)
+
+    return PriceResult(
+        name=product.name,
+        price=price,
+        currency=product.currency or "GBP",
+        url=product.url,
+        payload={
+            "source": "adobe_page",
+            "method": "adobe_promo_marker",
+            "plan": plan,
+            "fragment_url": fragment_url,
+            "promo_marker": promo_marker,
+            "promo_active": promo_active,
+            "promo_price": promo_price,
+            "normal_price": normal_price,
+            "note": "Adobe prices are resolved dynamically; this tracks known promo markers in Adobe fragments.",
         },
     )
 
@@ -155,7 +401,6 @@ async def scan_generic(product: Product, *, timeout_seconds: int = 25) -> PriceR
     candidates.extend(_prices_from_json_ld(soup, product.currency))
 
     if not candidates:
-        # Last resort: check compact visible text, but only use fairly obvious currency-prefixed prices.
         visible_text = soup.get_text(" ", strip=True)
         parsed = parse_price_text(visible_text[:20000], product.currency)
         if parsed:
@@ -167,7 +412,6 @@ async def scan_generic(product: Product, *, timeout_seconds: int = 25) -> PriceR
             "Could not find a price. Add a CSS selector with /add_product or use /add_appstore_app."
         )
 
-    # Usually the lowest detected sale price is the interesting one. This can be adjusted per site later.
     price, currency, method, details = sorted(candidates, key=lambda row: row[0])[0]
 
     return PriceResult(
@@ -253,7 +497,6 @@ def parse_price_text(text: str, default_currency: str = "GBP") -> tuple[float, s
     if not text:
         return None
 
-    # First look for currency-prefixed prices because those are less ambiguous.
     matches = list(PRICE_RE.finditer(text))
     for match in matches:
         symbol = match.group("symbol")
@@ -262,7 +505,6 @@ def parse_price_text(text: str, default_currency: str = "GBP") -> tuple[float, s
         if price is not None:
             return price, CURRENCY_SYMBOLS.get(symbol, default_currency.upper())
 
-    # Then accept a plain numeric if the whole string is basically a price.
     compact = text.strip()
     if re.fullmatch(r"\d{1,4}(?:[,.]\d{2})?", compact):
         price = _normalise_number(compact)
@@ -275,14 +517,12 @@ def parse_price_text(text: str, default_currency: str = "GBP") -> tuple[float, s
 def _normalise_number(raw: str) -> float | None:
     value = raw.strip().replace(" ", "")
 
-    # Convert common thousands/decimal combinations.
     if value.count(",") > 0 and value.count(".") > 0:
         if value.rfind(",") > value.rfind("."):
             value = value.replace(".", "").replace(",", ".")
         else:
             value = value.replace(",", "")
     elif value.count(",") == 1 and value.count(".") == 0:
-        # Treat 12,99 as 12.99 but 1,299 as 1299.
         left, right = value.split(",")
         if len(right) == 2:
             value = f"{left}.{right}"

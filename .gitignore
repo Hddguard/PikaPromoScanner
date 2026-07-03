@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Runtime database
+data/*.sqlite3
+data/*.sqlite
+data/*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs / temp
+*.log
+*.tmp
+.DS_Store
+
+# Backups
+*.bak_*

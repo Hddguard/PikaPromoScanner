@@ -283,6 +283,123 @@ async def add_appstore_app(
     )
 
 
+
+
+@bot.tree.command(name="add_capcut_vip", description="Add a CapCut Pro VIP subscription tracker.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    product_id="CapCut product ID to track.",
+    region="Region code sent to CapCut API, e.g. GB or VN.",
+    normal_price="Usual full price. Leave blank to use known default.",
+    threshold_percent="Alert when discount reaches this percentage.",
+)
+async def add_capcut_vip(
+    interaction: discord.Interaction,
+    product_id: Literal["capcut_pro_monthly_base", "capcut_pro_yearly_base"] = "capcut_pro_yearly_base",
+    region: str = "GB",
+    normal_price: float | None = None,
+    threshold_percent: float = CONFIG.default_discount_threshold_percent,
+) -> None:
+    defaults = {
+        "capcut_pro_monthly_base": ("CapCut Pro Monthly", 19.99),
+        "capcut_pro_yearly_base": ("CapCut Pro Yearly", 59.99),
+    }
+    name, default_price = defaults[product_id]
+    product_id_new = await DB.add_product(
+        name=name,
+        url="https://commerce-api-sg.capcut.com/commerce/v1/subscription/cc_price_list",
+        source="capcut_vip",
+        currency="USD",
+        normal_price=normal_price if normal_price is not None else default_price,
+        threshold_percent=threshold_percent,
+        metadata={
+            "product_id": product_id,
+            "region": region.upper(),
+            "language": "en",
+        },
+    )
+    await interaction.response.send_message(
+        f"Added **{name}** as product #{product_id_new}. Use `/scan_now product_id:{product_id_new}` to test it. 🎬",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="add_clipstudio", description="Add a Clip Studio Paint one-time licence tracker.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    edition="Clip Studio edition.",
+    currency="Currency price block to track.",
+    normal_price="Usual full price. Leave blank to use known default.",
+    threshold_percent="Alert when discount reaches this percentage.",
+)
+async def add_clipstudio(
+    interaction: discord.Interaction,
+    edition: Literal["PRO", "EX"] = "PRO",
+    currency: Literal["GBP", "USD", "EUR", "CAD", "AUD", "CNY"] = "GBP",
+    normal_price: float | None = None,
+    threshold_percent: float = CONFIG.default_discount_threshold_percent,
+) -> None:
+    defaults = {
+        ("PRO", "GBP"): 45.00,
+        ("EX", "GBP"): 197.00,
+        ("PRO", "USD"): 63.00,
+        ("EX", "USD"): 277.00,
+        ("PRO", "EUR"): 52.99,
+        ("EX", "EUR"): 233.99,
+    }
+    name = f"Clip Studio Paint {edition}"
+    product_id = await DB.add_product(
+        name=name,
+        url="https://www.clipstudio.net/en/purchase/",
+        source="clipstudio_onetime",
+        currency=currency,
+        normal_price=normal_price if normal_price is not None else defaults.get((edition, currency)),
+        threshold_percent=threshold_percent,
+        metadata={
+            "edition": edition,
+            "currency": currency,
+        },
+    )
+    await interaction.response.send_message(
+        f"Added **{name}** as product #{product_id}. Use `/scan_now product_id:{product_id}` to test it. 🖌️",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="add_adobe_page", description="Add an Adobe pricing page tracker.")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    name="Product name, e.g. Adobe Photoshop Single App",
+    url="Adobe pricing page URL.",
+    normal_price="Usual full price. Used to calculate discount percentage.",
+    currency="Currency code, e.g. GBP, USD, EUR",
+    threshold_percent="Alert when discount reaches this percentage.",
+    css_selector="Optional CSS selector for the exact price element.",
+)
+async def add_adobe_page(
+    interaction: discord.Interaction,
+    name: str,
+    url: str,
+    normal_price: float | None = None,
+    currency: str = "GBP",
+    threshold_percent: float = CONFIG.default_discount_threshold_percent,
+    css_selector: str | None = None,
+) -> None:
+    product_id = await DB.add_product(
+        name=name,
+        url=url,
+        source="adobe_page",
+        currency=currency,
+        normal_price=normal_price,
+        threshold_percent=threshold_percent,
+        css_selector=css_selector,
+    )
+    await interaction.response.send_message(
+        f"Added **{name}** as product #{product_id}. Use `/scan_now product_id:{product_id}` to test it. 🎨",
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="products", description="List tracked products.")
 @app_commands.describe(show_inactive="Show inactive/removed products too")
 async def products(interaction: discord.Interaction, show_inactive: bool = False) -> None:
